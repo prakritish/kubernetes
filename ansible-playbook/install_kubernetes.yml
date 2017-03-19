@@ -1,0 +1,143 @@
+---
+# This playbook install kubernetes on master and node/minion.
+# This is customiezed for linuxacademy servers so that it can
+# be used with internal IPs of Linux Academy servers.
+# It assumes the following:
+#   * Ansible is configured with three host groups
+#     - kuber-minions : This should have all nodes/minions
+#                       aliased as minion1, minion2 .....
+#     - kuber-master  : This should contain the kubernetes 
+#                       master aliased as 'master'
+#     - kuber         : This is a super host group containing
+#                       kuber-master and kuber-minions as child
+# Please note, this also assumes that we are using Centos 7
+# for the master and minions. The repository or packages may 
+# change depending on the OS used.
+#
+- hosts: kuber
+  tasks:
+    - name: change selinux settings
+      command: setenforce 0
+      ignore_errors: yes
+    - name: Install dependencies
+      yum:
+        pkg: ntp
+        state: installed
+      notify: start ntpd
+    - name: remove docker-ce
+      yum:
+        name: "{{ item }}"
+        state: absent
+      with_items:
+        - docker-ce
+        - docker-ce-selinux
+# This is again related to linuxacademy vms, so that we can
+# connect to master and minions using aliases.
+    - name: insert hosts
+      lineinfile:
+        dest: /etc/hosts
+        line: "{{ item.line }}"
+        regexp: "{{ item.regex }}"
+      with_items:
+        - { regex: "master", line: "172.31.31.36 master"}
+        - { regex: "minion1", line: "172.31.21.219 minion1"}
+        - { regex: "minion2", line: "172.31.31.229 minion2"}
+        - { regex: "minion3", line: "172.31.16.194 minion3"}
+        - { regex: "minion4", line: "172.31.30.235 minion4"}
+    - name: remove docker-ce.repo
+      file:
+        name: /etc/yum.repos.d/docker-ce.repo
+        state: absent
+    - name: enable virt7-docker-common-release repo
+      yum_repository: 
+        name: virt7-docker-common-release
+        description: Docker Common Release
+        file: virt7-docker-common-release
+        baseurl: http://cbs.centos.org/repos/virt7-docker-common-release/x86_64/os/
+        gpgcheck: no
+        state: present
+    - name: install docker and kubernetes
+      yum:
+        update_cache: yes
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - kubernetes
+        - docker
+    - name: update /etc/kubernetes/config
+      lineinfile:
+        dest: /etc/kubernetes/config
+        line: "{{ item.line }}"
+        regexp: "{{ item.regex }}"
+      with_items:
+        - { regex: 'KUBE_MASTER', line: 'KUBE_MASTER="--master=http://master:8080"' }
+        - { regex: 'KUBE_ETCD_SERVERS', line: 'KUBE_ETCD_SERVERS="--etcd-seervers=http://master:2379"'}
+    - name: update /etc/kubernetes/apiserver
+      lineinfile:
+        dest: /etc/kubernetes/apiserver
+        line: "{{ item.line }}"
+        regexp: "{{ item.regex }}"
+      with_items:
+        - { regex: 'KUBE_API_ADDRESS', line: 'KUBE_API_ADDRESS="--address=0.0.0.0"'}
+        - { regex: 'KUBE_API_PORT', line: 'KUBELET_PORT="--kubelet-port=10250"' }
+        - { regex: 'KUBELET_PORT', line: 'KUBELET_PORT="--kubelet-port=10250"'}
+        - { regex: 'KUBE_ETCD_SERVERS', line: 'KUBE_ETCD_SERVERS="--etcd-servers=http://master:2379"'}
+        - { regex: 'KUBE_ADMISSION_CONTROL', line: '#KUBE_ADMISSION_CONTROL'}
+  handlers:
+    - name: start ntpd
+      service:
+        name: ntpd
+        state: started
+
+- hosts: kuber-master
+  tasks:
+    - name: start services for master
+      service:
+        name: "{{ item }}"
+        state: started
+      with_items:
+        - etcd
+        - kube-apiserver
+        - kube-controller-manager
+        - kube-scheduler
+    - name: install bash-completion
+      yum:
+        pkg: bash-completion
+        state: present
+    - name: add .bashrc to .bash_profile
+      lineinfile:
+        dest: ~/.bash_profile
+        line: source ~/.bashrc
+    - name: add kubectl autocomplete
+      lineinfile:
+        dest: ~/.bashrc
+        line: 'source <(kubectl completion bash)'
+
+- hosts: kuber-minions
+  tasks:
+    - name: update /etc/kubernetes/kubelet
+      lineinfile:
+        dest: /etc/kubernetes/kubelet
+        line: "{{ item.line }}"
+        regexp: "{{ item.regex }}"
+      with_items:
+        - { regex: 'KUBELET_ADDRESS', line: 'KUBELET_ADDRESS="--address=0.0.0.0"'}
+        - { regex: 'KUBELET_PORT', line: 'KUBELET_PORT="--port=10250"'}
+        - { regex: 'KUBELET_HOSTNAME', line: 'KUBELET_HOSTNAME="--hostname-override={{ inventory_hostname }}"'}
+        - { regex: 'KUBELET_API_SERVER', line: 'KUBELET_API_SERVER="--api-servers=http://master:8080"'}
+        - { regex: 'KUBELET_POD_INFRA_CONTAINER', line: '# KUBELET_POD_INFRA_CONTAINER'}
+    - name: start minion services
+      service:
+        name: "{{ item }}"
+        state: started
+      with_items:
+        - kube-proxy
+        - kubelet
+        - docker
+    - name: install docker-py
+      pip:
+        name: docker-py
+    - name: check docker
+      docker_container:
+        name: hello
+        image: hello-world
